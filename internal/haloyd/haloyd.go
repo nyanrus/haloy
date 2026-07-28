@@ -2,9 +2,11 @@ package haloyd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -33,6 +35,7 @@ const (
 	eventDebounceMaxWait = 30 * time.Second // Max debounce postponement while events keep arriving
 	eventsReconnectDelay = 5 * time.Second  // Delay before re-subscribing to Docker events after a stream error
 	updateTimeout        = 15 * time.Minute // Max time for a single update operation
+	apiShutdownTimeout   = 30 * time.Second
 )
 
 type ContainerEvent struct {
@@ -85,6 +88,11 @@ func Run(debug bool) {
 	if err != nil {
 		logging.LogFatal(logger, "Failed to load configuration file", "error", err)
 	}
+	if haloydConfig != nil {
+		if err := haloydConfig.Validate(); err != nil {
+			logging.LogFatal(logger, "Invalid configuration file", "error", err)
+		}
+	}
 
 	cli, err := docker.NewClient(ctx)
 	if err != nil {
@@ -97,13 +105,19 @@ func Run(debug bool) {
 		logging.LogFatal(logger, "%s environment variable not set", constants.EnvVarAPIToken)
 	}
 
-	apiServer := api.NewServer(apiToken, db, logBroker, logLevel)
+	tunnelPolicy := api.DefaultTunnelPolicy()
+	if haloydConfig != nil {
+		tunnelPolicy.MaxOpen = haloydConfig.API.MaxTunnels
+		tunnelPolicy.MaxOpenPerClient = haloydConfig.API.MaxTunnelsPerClient
+		tunnelPolicy.AllowHostNetworkPortOverride = haloydConfig.API.AllowHostNetworkPortOverride
+	}
+	apiServer := api.NewServer(apiToken, db, logBroker, logLevel, tunnelPolicy)
 
 	// The API is served on a loopback listener; the proxy forwards API-domain
 	// and localhost API traffic to it.
 	apiListenAddr := net.JoinHostPort(constants.HaloydAPIHost, constants.HaloydAPIPort)
 	go func() {
-		if err := apiServer.ListenAndServe(apiListenAddr); err != nil {
+		if err := apiServer.ListenAndServe(apiListenAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logging.LogFatal(logger, "API listener failed", "addr", apiListenAddr, "error", err)
 		}
 	}()
@@ -368,6 +382,11 @@ func Run(debug bool) {
 				certManager.Stop()
 			}
 			cancel()
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), apiShutdownTimeout)
+			if err := apiServer.Shutdown(shutdownCtx); err != nil {
+				logger.Error("API shutdown failed", "error", err)
+			}
+			shutdownCancel()
 			return
 		}
 	}

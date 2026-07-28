@@ -20,7 +20,10 @@ type HaloydConfig struct {
 }
 
 type HaloydAPIConfig struct {
-	Domain string `json:"domain" yaml:"domain" toml:"domain"`
+	Domain                       string `json:"domain" yaml:"domain" toml:"domain"`
+	MaxTunnels                   int    `json:"maxTunnels,omitempty" yaml:"max_tunnels,omitempty" toml:"max_tunnels,omitempty"`
+	MaxTunnelsPerClient          int    `json:"maxTunnelsPerClient,omitempty" yaml:"max_tunnels_per_client,omitempty" toml:"max_tunnels_per_client,omitempty"`
+	AllowHostNetworkPortOverride bool   `json:"allowHostNetworkPortOverride,omitempty" yaml:"allow_host_network_port_override,omitempty" toml:"allow_host_network_port_override,omitempty"`
 }
 
 // HealthMonitorConfig holds configuration for continuous health monitoring.
@@ -94,6 +97,15 @@ func (mc *HaloydConfig) Validate() error {
 		if err := helpers.IsValidDomain(mc.API.Domain); err != nil {
 			return fmt.Errorf("invalid domain format: %w", err)
 		}
+	}
+	if mc.API.MaxTunnels < 0 {
+		return fmt.Errorf("api.max_tunnels cannot be negative")
+	}
+	if mc.API.MaxTunnelsPerClient < 0 {
+		return fmt.Errorf("api.max_tunnels_per_client cannot be negative")
+	}
+	if mc.API.MaxTunnels > 0 && mc.API.MaxTunnelsPerClient > mc.API.MaxTunnels {
+		return fmt.Errorf("api.max_tunnels_per_client cannot exceed api.max_tunnels")
 	}
 
 	return nil

@@ -123,10 +123,12 @@ type Proxy struct {
 	shutdownMu sync.Mutex
 	isShutdown bool
 
-	// Active hijacked WebSocket tunnels, tracked so Shutdown can drain them.
-	wsMu    sync.Mutex
-	wsConns map[net.Conn]struct{}
-	wsWg    sync.WaitGroup
+	// Active hijacked connections, tracked so Shutdown can drain WebSockets
+	// and control-plane TCP tunnels.
+	hijackMu     sync.Mutex
+	hijackConns  map[net.Conn]struct{}
+	hijackWg     sync.WaitGroup
+	hijackGroups int
 }
 
 // CertLoader is an interface for loading TLS certificates.
@@ -152,7 +154,7 @@ func New(logger *slog.Logger, certLoader CertLoader) *Proxy {
 			ResponseHeaderTimeout: 60 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		},
-		wsConns: make(map[net.Conn]struct{}),
+		hijackConns: make(map[net.Conn]struct{}),
 	}
 
 	// Initialize with empty config
@@ -279,25 +281,25 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// Hijacked WebSocket connections are not tracked by http.Server.Shutdown,
-	// so drain them separately.
-	wsDone := make(chan struct{})
+	// Hijacked connections are not tracked by http.Server.Shutdown, so drain
+	// WebSockets and API TCP tunnels separately.
+	hijackDone := make(chan struct{})
 	go func() {
-		p.wsWg.Wait()
-		close(wsDone)
+		p.hijackWg.Wait()
+		close(hijackDone)
 	}()
 
 	select {
-	case <-wsDone:
+	case <-hijackDone:
 	case <-ctx.Done():
-		p.wsMu.Lock()
-		open := len(p.wsConns) / 2
-		for conn := range p.wsConns {
-			conn.Close()
+		p.hijackMu.Lock()
+		open := p.hijackGroups
+		for conn := range p.hijackConns {
+			_ = conn.Close()
 		}
-		p.wsMu.Unlock()
-		<-wsDone
-		errs = append(errs, fmt.Errorf("force-closed %d websocket tunnel(s): %w", open, ctx.Err()))
+		p.hijackMu.Unlock()
+		<-hijackDone
+		errs = append(errs, fmt.Errorf("force-closed %d websocket/tunnel connection group(s): %w", open, ctx.Err()))
 	}
 
 	p.transport.CloseIdleConnections()
@@ -310,30 +312,34 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// trackWebSocket registers a hijacked tunnel's connections for shutdown
+// trackHijacked registers a hijacked connection group's sockets for shutdown
 // draining. It returns false if the proxy is already shutting down.
-func (p *Proxy) trackWebSocket(conns ...net.Conn) bool {
+func (p *Proxy) trackHijacked(conns ...net.Conn) bool {
 	p.shutdownMu.Lock()
 	defer p.shutdownMu.Unlock()
 	if p.isShutdown {
 		return false
 	}
-	p.wsWg.Add(1)
-	p.wsMu.Lock()
+	p.hijackWg.Add(1)
+	p.hijackMu.Lock()
 	for _, conn := range conns {
-		p.wsConns[conn] = struct{}{}
+		p.hijackConns[conn] = struct{}{}
 	}
-	p.wsMu.Unlock()
+	p.hijackGroups++
+	p.hijackMu.Unlock()
 	return true
 }
 
-func (p *Proxy) untrackWebSocket(conns ...net.Conn) {
-	p.wsMu.Lock()
+func (p *Proxy) untrackHijacked(conns ...net.Conn) {
+	p.hijackMu.Lock()
 	for _, conn := range conns {
-		delete(p.wsConns, conn)
+		delete(p.hijackConns, conn)
 	}
-	p.wsMu.Unlock()
-	p.wsWg.Done()
+	if p.hijackGroups > 0 {
+		p.hijackGroups--
+	}
+	p.hijackMu.Unlock()
+	p.hijackWg.Done()
 }
 
 // httpHandler handles HTTP requests (port 80).
@@ -540,6 +546,10 @@ func (p *Proxy) proxyToAPIBackend(w http.ResponseWriter, r *http.Request, startT
 		},
 	}
 
+	if requestIsTCPUpgrade(r) {
+		proxy.ServeHTTP(&trackedUpgradeWriter{ResponseWriter: w, proxy: p}, r)
+		return
+	}
 	proxy.ServeHTTP(w, r)
 }
 

@@ -36,6 +36,28 @@ func TestHaloydConfig_Validate(t *testing.T) {
 			wantErr: true,
 			errMsg:  "invalid domain format",
 		},
+		{
+			name: "valid tunnel limits",
+			config: HaloydConfig{
+				API: HaloydAPIConfig{MaxTunnels: 100, MaxTunnelsPerClient: 25},
+			},
+		},
+		{
+			name: "rejects per-client limit above global limit",
+			config: HaloydConfig{
+				API: HaloydAPIConfig{MaxTunnels: 10, MaxTunnelsPerClient: 11},
+			},
+			wantErr: true,
+			errMsg:  "cannot exceed",
+		},
+		{
+			name: "rejects negative tunnel limit",
+			config: HaloydConfig{
+				API: HaloydAPIConfig{MaxTunnels: -1},
+			},
+			wantErr: true,
+			errMsg:  "cannot be negative",
+		},
 	}
 
 	for _, tt := range tests {

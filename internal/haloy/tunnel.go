@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,13 @@ import (
 	"github.com/haloydev/haloy/internal/helpers"
 	"github.com/haloydev/haloy/internal/ui"
 	"github.com/spf13/cobra"
+)
+
+const (
+	tunnelHandshakeTimeout    = 15 * time.Second
+	maxTunnelErrorBodyBytes   = 64 << 10
+	maxTunnelHeaderBytes      = 64 << 10
+	maxLocalTunnelConnections = 64
 )
 
 func TunnelCmd(configPath *string, flags *appCmdFlags) *cobra.Command {
@@ -36,6 +45,9 @@ forwarded to the container's port.
 If local-port and --port are omitted, the local port defaults to the port configured
 for the target in haloy.yaml. The remote port also defaults to the configured port.
 Use --remote-port to override the container port.
+
+The listener is loopback-only, but any process running on the local machine can
+connect to it while the tunnel is active.
 
 Examples:
   # Tunnel to postgres (uses port 5432 from config for both local and remote)
@@ -156,18 +168,13 @@ func runTunnel(ctx context.Context, targetConfig *config.TargetConfig, localPort
 	// Determine TLS based on localhost check (same logic as BuildServerURL)
 	useTLS := !helpers.IsLocalhost(normalizedURL)
 
-	// Add default port if not specified
-	host := normalizedURL
-	if !strings.Contains(host, ":") {
-		if useTLS {
-			host += ":443"
-		} else {
-			host += ":80"
-		}
+	host, err := tunnelServerAddress(normalizedURL, useTLS)
+	if err != nil {
+		return fmt.Errorf("invalid server address: %w", err)
 	}
 
 	// Check if port is already in use
-	listenAddr := fmt.Sprintf("localhost:%s", localPort)
+	listenAddr := net.JoinHostPort("127.0.0.1", localPort)
 	checkConn, err := net.DialTimeout("tcp", listenAddr, 100*time.Millisecond)
 	if err == nil {
 		checkConn.Close()
@@ -180,22 +187,24 @@ func runTunnel(ctx context.Context, targetConfig *config.TargetConfig, localPort
 	}
 	defer listener.Close()
 
-	ui.Info("Tunnel listening on localhost:%s -> %s", localPort, targetConfig.Name)
+	stopListener := context.AfterFunc(ctx, func() {
+		_ = listener.Close()
+	})
+	defer stopListener()
+
+	ui.Info("Tunnel listening on 127.0.0.1:%s -> %s", localPort, targetConfig.Name)
 	ui.Info("Press Ctrl+C to stop")
+
+	slots := make(chan struct{}, maxLocalTunnelConnections)
+	var handlers sync.WaitGroup
 
 	// Accept connections
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		localConn, err := listener.Accept()
 		if err != nil {
-			// Check if context was cancelled
 			select {
 			case <-ctx.Done():
+				handlers.Wait()
 				return nil
 			default:
 				ui.Warn("Failed to accept connection: %v", err)
@@ -203,17 +212,37 @@ func runTunnel(ctx context.Context, targetConfig *config.TargetConfig, localPort
 			}
 		}
 
+		select {
+		case slots <- struct{}{}:
+		default:
+			_ = localConn.Close()
+			ui.Warn("Tunnel connection limit reached (%d)", maxLocalTunnelConnections)
+			continue
+		}
+
 		// Handle each connection in a goroutine
+		handlers.Add(1)
 		go func(local net.Conn) {
+			defer handlers.Done()
+			defer func() { <-slots }()
 			defer local.Close()
 
 			// Establish tunnel to server
-			remote, err := dialTunnel(host, useTLS, token, targetConfig.Name, remotePort, containerID)
+			remote, err := dialTunnel(ctx, host, useTLS, token, targetConfig.Name, remotePort, containerID)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				ui.Error("Failed to establish tunnel: %v", err)
 				return
 			}
 			defer remote.Close()
+
+			stopConnections := context.AfterFunc(ctx, func() {
+				_ = local.Close()
+				_ = remote.Close()
+			})
+			defer stopConnections()
 
 			// Bidirectional copy
 			var wg sync.WaitGroup
@@ -246,112 +275,175 @@ func runTunnel(ctx context.Context, targetConfig *config.TargetConfig, localPort
 	}
 }
 
+func tunnelServerAddress(host string, useTLS bool) (string, error) {
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host, nil
+	}
+
+	hostname := strings.Trim(host, "[]")
+	if hostname == "" || net.ParseIP(hostname) == nil && strings.Contains(hostname, ":") {
+		return "", fmt.Errorf("invalid host %q", host)
+	}
+
+	port := "80"
+	if useTLS {
+		port = "443"
+	}
+	return net.JoinHostPort(hostname, port), nil
+}
+
 // dialTunnel establishes a TCP tunnel to a container through the API server.
 // host should include the port (e.g., "example.com:443").
 // It returns a net.Conn that can be used to communicate with the container.
-func dialTunnel(host string, useTLS bool, token, appName, remotePort, containerID string) (net.Conn, error) {
-	// Build path with query params
-	path := fmt.Sprintf("/v1/tunnel/%s", appName)
-
-	params := make([]string, 0)
+func dialTunnel(ctx context.Context, host string, useTLS bool, token, appName, remotePort, containerID string) (net.Conn, error) {
+	requestURL := &url.URL{
+		Scheme: "http",
+		Host:   host,
+		Path:   "/v1/tunnel/" + appName,
+	}
+	if useTLS {
+		requestURL.Scheme = "https"
+	}
+	params := requestURL.Query()
 	if remotePort != "" {
-		params = append(params, "port="+remotePort)
+		params.Set("port", remotePort)
 	}
 	if containerID != "" {
-		params = append(params, "container="+containerID)
+		params.Set("container", containerID)
 	}
-	if len(params) > 0 {
-		path += "?" + strings.Join(params, "&")
-	}
+	requestURL.RawQuery = params.Encode()
 
-	// Establish connection
-	var conn net.Conn
-	var err error
+	dialCtx, cancel := context.WithTimeout(ctx, tunnelHandshakeTimeout)
+	defer cancel()
+
+	dialer := &net.Dialer{}
+	var (
+		conn net.Conn
+		err  error
+	)
 	if useTLS {
-		// Force HTTP/1.1 via ALPN - HTTP/2 doesn't support connection hijacking
-		conn, err = tls.Dial("tcp", host, &tls.Config{
-			NextProtos: []string{"http/1.1"},
-		})
+		tlsDialer := &tls.Dialer{
+			NetDialer: dialer,
+			Config: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				NextProtos: []string{"http/1.1"},
+			},
+		}
+		conn, err = tlsDialer.DialContext(dialCtx, "tcp", host)
 	} else {
-		conn, err = net.Dial("tcp", host)
+		conn, err = dialer.DialContext(dialCtx, "tcp", host)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to server: %w", err)
 	}
-
-	// Send HTTP request manually with upgrade headers
-	// Extract just the hostname (without port) for the Host header
-	hostHeader := strings.Split(host, ":")[0]
-	httpReq := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: %s\r\n", path, hostHeader)
-	if token != "" {
-		httpReq += fmt.Sprintf("Authorization: Bearer %s\r\n", token)
+	if err := conn.SetDeadline(time.Now().Add(tunnelHandshakeTimeout)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to set handshake deadline: %w", err)
 	}
-	httpReq += "Connection: Upgrade\r\n"
-	httpReq += "Upgrade: tcp\r\n"
-	httpReq += "\r\n"
 
-	_, err = conn.Write([]byte(httpReq))
+	req, err := http.NewRequestWithContext(dialCtx, http.MethodPost, requestURL.String(), nil)
 	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to create tunnel request: %w", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "tcp")
+
+	if err := req.Write(conn); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
-	// Read response
-	reader := bufio.NewReader(conn)
-	statusLine, err := reader.ReadString('\n')
+	limitedReader := &tunnelHandshakeReader{reader: conn, remaining: maxTunnelHeaderBytes, limited: true}
+	reader := bufio.NewReader(limitedReader)
+	resp, err := http.ReadResponse(reader, req)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
+	limitedReader.disableLimit()
 
-	// Parse status code
-	parts := strings.SplitN(statusLine, " ", 3)
-	if len(parts) < 2 {
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxTunnelErrorBodyBytes+1))
+		_ = resp.Body.Close()
 		conn.Close()
-		return nil, fmt.Errorf("invalid response: %s", statusLine)
-	}
-
-	statusCode := 0
-	fmt.Sscanf(parts[1], "%d", &statusCode)
-
-	// Read headers until empty line
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("failed to read headers: %w", err)
-		}
-		if strings.TrimSpace(line) == "" {
-			break
-		}
-	}
-
-	// Accept both 101 (Switching Protocols) and 200 (Connection Established)
-	if statusCode != 101 && statusCode != 200 {
-		// Try to read error body
-		body, _ := io.ReadAll(reader)
-		conn.Close()
-		if statusCode == 401 {
+		if resp.StatusCode == http.StatusUnauthorized {
 			return nil, fmt.Errorf("authentication failed - check your %s", constants.EnvVarAPIToken)
 		}
-		return nil, fmt.Errorf("tunnel request failed with status %d: %s", statusCode, strings.TrimSpace(string(body)))
+		if readErr != nil {
+			return nil, fmt.Errorf("tunnel request failed with status %d (unable to read error: %w)", resp.StatusCode, readErr)
+		}
+		truncated := len(body) > maxTunnelErrorBodyBytes
+		if truncated {
+			body = body[:maxTunnelErrorBodyBytes]
+		}
+		message := strings.TrimSpace(string(body))
+		if truncated {
+			message += "…"
+		}
+		return nil, fmt.Errorf("tunnel request failed with status %d: %s", resp.StatusCode, message)
 	}
 
-	// Check if there's buffered data in the reader
-	buffered := reader.Buffered()
+	if !strings.EqualFold(resp.Header.Get("Upgrade"), "tcp") ||
+		!headerContainsToken(resp.Header.Get("Connection"), "upgrade") {
+		_ = resp.Body.Close()
+		conn.Close()
+		return nil, fmt.Errorf("invalid tunnel upgrade response")
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = resp.Body.Close()
+		conn.Close()
+		return nil, fmt.Errorf("failed to clear handshake deadline: %w", err)
+	}
 
-	if buffered > 0 {
-		// Return a connection that first reads from the buffer, then from the conn
+	if reader.Buffered() > 0 {
 		return &tunnelConn{
 			reader:   reader,
 			writer:   conn,
 			closer:   conn,
-			respBody: nil,
+			respBody: resp.Body,
 		}, nil
 	}
 
-	// No buffered data, return the raw connection
+	_ = resp.Body.Close()
 	return conn, nil
+}
+
+func headerContainsToken(value, token string) bool {
+	for part := range strings.SplitSeq(value, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
+}
+
+type tunnelHandshakeReader struct {
+	reader    io.Reader
+	remaining int64
+	limited   bool
+}
+
+func (r *tunnelHandshakeReader) Read(p []byte) (int, error) {
+	if !r.limited {
+		return r.reader.Read(p)
+	}
+	if r.remaining <= 0 {
+		return 0, fmt.Errorf("tunnel response headers exceed %d bytes", maxTunnelHeaderBytes)
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
+func (r *tunnelHandshakeReader) disableLimit() {
+	r.limited = false
 }
 
 // tunnelConn wraps the HTTP response body for reading and the underlying connection for writing.

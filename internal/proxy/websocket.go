@@ -78,10 +78,10 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, route *R
 
 	// Register the tunnel so Shutdown can drain it; hijacked connections are
 	// invisible to http.Server.Shutdown.
-	if !p.trackWebSocket(clientConn, backendConn) {
+	if !p.trackHijacked(clientConn, backendConn) {
 		return
 	}
-	defer p.untrackWebSocket(clientConn, backendConn)
+	defer p.untrackHijacked(clientConn, backendConn)
 
 	setForwardedHeaders(r)
 

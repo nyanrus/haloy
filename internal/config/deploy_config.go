@@ -66,6 +66,13 @@ type TargetConfig struct {
 	// something new every time. Left empty, Docker's default stands.
 	Hostname string `json:"hostname,omitempty" yaml:"hostname,omitempty" toml:"hostname,omitempty"`
 
+	// Publish maps container ports onto the host, in Docker's own
+	// "[host_ip:]host_port:container_port[/proto]" form. Public traffic
+	// belongs behind the proxy and should use `domains` instead; this is for
+	// the doors that must not go through it — an admin dashboard or a
+	// database socket bound to 127.0.0.1 and reached over an SSH tunnel.
+	Publish []string `json:"publish,omitempty" yaml:"publish,omitempty" toml:"publish,omitempty"`
+
 	// HealthCheck is Docker's own HEALTHCHECK — distinct from HealthCheckPath,
 	// which is the HTTP probe haloy runs itself to decide whether a replica
 	// takes traffic. Containers with no HTTP surface (a database, a broker)

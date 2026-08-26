@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/docker/go-connections/nat"
 	"github.com/haloydev/haloy/internal/config"
 	"github.com/haloydev/haloy/internal/constants"
 	"github.com/haloydev/haloy/internal/healthcheck"
@@ -93,15 +94,22 @@ func RunContainer(ctx context.Context, cli *client.Client, deploymentID, imageRe
 		return result, err
 	}
 
+	exposedPorts, portBindings, err := nat.ParsePortSpecs(targetConfig.Publish)
+	if err != nil {
+		return result, fmt.Errorf("invalid publish: %w", err)
+	}
+	hostConfig.PortBindings = portBindings
+
 	for i := range make([]struct{}, *targetConfig.Replicas) {
 		envVars := append(envVars, fmt.Sprintf("%s=%d", constants.EnvVarReplicaID, i+1))
 		containerConfig := &container.Config{
-			Image:       imageRef,
-			Labels:      labels,
-			Env:         envVars,
-			Cmd:         targetConfig.Command,
-			Hostname:    targetConfig.Hostname,
-			Healthcheck: healthConfig,
+			Image:        imageRef,
+			Labels:       labels,
+			Env:          envVars,
+			Cmd:          targetConfig.Command,
+			Hostname:     targetConfig.Hostname,
+			ExposedPorts: exposedPorts,
+			Healthcheck:  healthConfig,
 		}
 
 		var containerName string

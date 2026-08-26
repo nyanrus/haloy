@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 
+	"github.com/docker/go-connections/nat"
 	"github.com/haloydev/haloy/internal/helpers"
 )
 
@@ -114,6 +115,22 @@ func (tc *TargetConfig) Validate(format string) error {
 	if tc.HealthCheckPath != "" {
 		if tc.HealthCheckPath[0] != '/' {
 			return fmt.Errorf("%s must start with a slash", GetFieldNameForFormat(TargetConfig{}, "HealthCheckPath", format))
+		}
+	}
+
+	// A published host port can only be held by one container at a time, and a
+	// rolling deployment runs the new one before stopping the old — so the
+	// replacement would fail to bind and the deploy would stop there. Same
+	// reasoning as the static-naming rule above.
+	if len(tc.Publish) > 0 && tc.DeploymentStrategy != DeploymentStrategyReplace {
+		return fmt.Errorf("%s requires %s 'replace' (a host port cannot be bound by the old and new container at once)",
+			GetFieldNameForFormat(TargetConfig{}, "Publish", format),
+			GetFieldNameForFormat(TargetConfig{}, "DeploymentStrategy", format))
+	}
+
+	for _, spec := range tc.Publish {
+		if _, _, err := nat.ParsePortSpecs([]string{spec}); err != nil {
+			return fmt.Errorf("invalid %s '%s': %w", GetFieldNameForFormat(TargetConfig{}, "Publish", format), spec, err)
 		}
 	}
 

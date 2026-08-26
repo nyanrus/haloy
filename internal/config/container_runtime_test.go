@@ -170,7 +170,7 @@ func TestHostnameValidation(t *testing.T) {
 		hostname string
 		wantErr  bool
 	}{
-		{name: "bare name", hostname: "natadeco-gw"},
+		{name: "bare name", hostname: "web-gw"},
 		{name: "dotted", hostname: "deployex.internal"},
 		{name: "no TLD required", hostname: "anubis"},
 		{name: "leading hyphen", hostname: "-bad", wantErr: true},
@@ -192,6 +192,60 @@ func TestHostnameValidation(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("Validate() error = %v, want nil for hostname %q", err, tt.hostname)
+			}
+		})
+	}
+}
+
+func TestPublishValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		publish  []string
+		strategy DeploymentStrategy
+		wantErr  string
+	}{
+		{
+			name:     "loopback admin port with replace",
+			publish:  []string{"127.0.0.1:5001:5001"},
+			strategy: DeploymentStrategyReplace,
+		},
+		{
+			name:     "several ports",
+			publish:  []string{"127.0.0.1:5432:5432", "127.0.0.1:4222:4222"},
+			strategy: DeploymentStrategyReplace,
+		},
+		{
+			name:     "rolling cannot hold a host port twice",
+			publish:  []string{"127.0.0.1:5001:5001"},
+			strategy: DeploymentStrategyRolling,
+			wantErr:  "requires",
+		},
+		{
+			name:     "nonsense spec",
+			publish:  []string{"this is not a port"},
+			strategy: DeploymentStrategyReplace,
+			wantErr:  "invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := &TargetConfig{
+				Name:               "app",
+				Server:             "test.haloy.dev",
+				Image:              &Image{Repository: "nginx"},
+				Publish:            tt.publish,
+				DeploymentStrategy: tt.strategy,
+			}
+			err := tc.Validate("yaml")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
 	}

@@ -126,3 +126,14 @@ func ValidatePort(port string) error {
 	}
 	return nil
 }
+
+// WildcardDomain returns the wildcard that would cover domain — "a.b.c" gives
+// "*.b.c" — or "" when there is nothing to wildcard (a bare "b.c" has no
+// parent to stand in for).
+func WildcardDomain(domain string) string {
+	parts := strings.Split(domain, ".")
+	if len(parts) < 3 {
+		return ""
+	}
+	return "*." + strings.Join(parts[1:], ".")
+}

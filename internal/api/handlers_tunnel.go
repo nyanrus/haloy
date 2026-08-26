@@ -32,8 +32,10 @@ type tunnelTarget struct {
 	port        string
 }
 
-type tunnelTargetResolver func(context.Context, string, string, string) (tunnelTarget, error)
-type tunnelDialer func(context.Context, string, string) (net.Conn, error)
+type (
+	tunnelTargetResolver func(context.Context, string, string, string) (tunnelTarget, error)
+	tunnelDialer         func(context.Context, string, string) (net.Conn, error)
+)
 
 type tunnelRequestError struct {
 	status  int

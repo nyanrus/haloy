@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,6 +24,41 @@ import (
 )
 
 const shutdownTimeout = 30 * time.Second
+
+// listenAddrs resolves the proxy's listen addresses, defaulting to :80/:443.
+//
+// They are overridable so a second proxy can be brought up beside whatever is
+// already serving the host — the incumbent keeps 80/443 while the new one is
+// verified on other ports, and the two swap once it answers correctly. Note
+// haloyd's own ACME challenge server holds 127.0.0.1:8080, so that one is
+// not available.
+func listenAddrs() (httpAddr, httpsAddr string, err error) {
+	httpAddr = envOrDefault(constants.EnvVarProxyHTTPAddr, constants.DefaultProxyHTTPAddr)
+	httpsAddr = envOrDefault(constants.EnvVarProxyHTTPSAddr, constants.DefaultProxyHTTPSAddr)
+
+	for _, addr := range []struct{ name, value string }{
+		{constants.EnvVarProxyHTTPAddr, httpAddr},
+		{constants.EnvVarProxyHTTPSAddr, httpsAddr},
+	} {
+		if _, _, splitErr := net.SplitHostPort(addr.value); splitErr != nil {
+			return "", "", fmt.Errorf("invalid %s %q: want a host:port such as \":8081\" or \"127.0.0.1:8081\"", addr.name, addr.value)
+		}
+	}
+
+	if httpAddr == httpsAddr {
+		return "", "", fmt.Errorf("%s and %s are both %q; they need separate listeners",
+			constants.EnvVarProxyHTTPAddr, constants.EnvVarProxyHTTPSAddr, httpAddr)
+	}
+
+	return httpAddr, httpsAddr, nil
+}
+
+func envOrDefault(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
+}
 
 // Run starts the proxy daemon and blocks until it receives SIGINT/SIGTERM or
 // a listener fails.
@@ -75,10 +111,23 @@ func Run(debug bool) error {
 			"age", time.Since(snap.GeneratedAt).Round(time.Second).String())
 	}
 
-	if err := proxyServer.Start(":80", ":443"); err != nil {
+	httpAddr, httpsAddr, err := listenAddrs()
+	if err != nil {
+		return err
+	}
+
+	if err := proxyServer.Start(httpAddr, httpsAddr); err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
-	logger.Info("Proxy started", "http", ":80", "https", ":443")
+	logger.Info("Proxy started", "http", httpAddr, "https", httpsAddr)
+	if httpAddr != constants.DefaultProxyHTTPAddr {
+		// ACME HTTP-01 is answered on port 80 by definition, so a proxy that
+		// is not there cannot renew its own certificates. That is fine when
+		// something else terminates TLS in front of it, and worth saying out
+		// loud when it is not.
+		logger.Warn("HTTP listener is not on port 80; ACME HTTP-01 challenges cannot reach this proxy",
+			"http", httpAddr)
+	}
 
 	socketPath := filepath.Join(proxyDir, constants.ProxySocketFileName)
 	if err := control.Start(socketPath); err != nil {

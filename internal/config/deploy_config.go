@@ -59,6 +59,13 @@ type TargetConfig struct {
 	// Resources caps what this container may take from the host.
 	Resources *Resources `json:"resources,omitempty" yaml:"resources,omitempty" toml:"resources,omitempty"`
 
+	// Hostname sets the container's own hostname. Docker otherwise uses the
+	// container ID, which is fine until something inside derives an identity
+	// from it — an Erlang or Elixir release names its node
+	// `<name>@<hostname>`, so with a rolling deployment the node is called
+	// something new every time. Left empty, Docker's default stands.
+	Hostname string `json:"hostname,omitempty" yaml:"hostname,omitempty" toml:"hostname,omitempty"`
+
 	// HealthCheck is Docker's own HEALTHCHECK — distinct from HealthCheckPath,
 	// which is the HTTP probe haloy runs itself to decide whether a replica
 	// takes traffic. Containers with no HTTP surface (a database, a broker)

@@ -100,6 +100,7 @@ func RunContainer(ctx context.Context, cli *client.Client, deploymentID, imageRe
 			Labels:      labels,
 			Env:         envVars,
 			Cmd:         targetConfig.Command,
+			Hostname:    targetConfig.Hostname,
 			Healthcheck: healthConfig,
 		}
 

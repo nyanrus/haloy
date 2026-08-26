@@ -163,6 +163,7 @@ func Run(debug bool) {
 		CertDir:          filepath.Join(dataDir, constants.CertStorageDir),
 		HTTPProviderPort: constants.CertificatesHTTPProviderPort,
 		TlsStaging:       debug,
+		External:         haloydConfig.Certificates,
 	}
 	certManager, err := NewCertificatesManager(certManagerConfig, certUpdateSignal)
 	if err != nil {

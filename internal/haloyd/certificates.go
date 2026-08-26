@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/haloydev/haloy/internal/config"
 	"github.com/haloydev/haloy/internal/constants"
 	"github.com/haloydev/haloy/internal/helpers"
 	"github.com/haloydev/haloy/internal/logging"
@@ -393,6 +394,9 @@ type CertificatesManagerConfig struct {
 	CertDir          string
 	HTTPProviderPort string
 	TlsStaging       bool
+	// External is the operator's own certificates — see
+	// config.CertificatesConfig. Nothing here is requested or renewed.
+	External config.CertificatesConfig
 }
 
 type CertificatesDomain struct {
@@ -539,6 +543,18 @@ func (cm *CertificatesManager) checkRenewals(logger *slog.Logger, domains []Cert
 
 	var errs []error
 	for canonical, domain := range currentState {
+		// A certificate the operator supplies is never ours to replace. Left
+		// in, the SAN comparison below would find it "changed" — a wildcard
+		// certificate can never equal the canonical-plus-aliases list, and
+		// wildcards are not writable as aliases — and ACME would overwrite a
+		// perfectly good certificate on the first refresh.
+		if cm.config.External.IsExternal(canonical) {
+			if err := cm.checkExternalCertificate(logger, canonical); err != nil {
+				logger.Warn("External certificate is not usable", "domain", canonical, "error", err)
+			}
+			continue
+		}
+
 		configChanged, err := cm.hasConfigurationChanged(logger, domain)
 		if err != nil {
 			logger.Error("Failed to check configuration", "domain", canonical, "error", err)
@@ -633,6 +649,48 @@ func (cm *CertificatesManager) hasConfigurationChanged(logger *slog.Logger, doma
 	sort.Strings(existingDomains)
 
 	return !reflect.DeepEqual(requiredDomains, existingDomains), nil
+}
+
+// checkExternalCertificate does not touch the certificate; it only says
+// whether one is there and still valid, so a missing or expired file shows up
+// in the log rather than as a browser warning nobody expected.
+func (cm *CertificatesManager) checkExternalCertificate(logger *slog.Logger, domain string) error {
+	// Look the way the proxy looks: <domain>.pem first, then the wildcard
+	// that covers it. One "*.example.com.pem" serving every subdomain is the
+	// ordinary shape of an edge-issued certificate, and a check that only
+	// knew about the exact name would call a working setup broken.
+	path := filepath.Join(cm.config.CertDir, domain+combinedCertExt)
+	certData, err := os.ReadFile(path)
+
+	if os.IsNotExist(err) {
+		if wildcard := helpers.WildcardDomain(domain); wildcard != "" {
+			wildcardPath := filepath.Join(cm.config.CertDir, wildcard+combinedCertExt)
+			if data, wildcardErr := os.ReadFile(wildcardPath); wildcardErr == nil {
+				path, certData, err = wildcardPath, data, nil
+			}
+		}
+	}
+
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no certificate at %s; put the combined key+certificate PEM there", path)
+		}
+		return err
+	}
+
+	parsedCert, err := parseCertificate(certData)
+	if err != nil {
+		return fmt.Errorf("cannot parse %s", path)
+	}
+
+	if time.Now().After(parsedCert.NotAfter) {
+		return fmt.Errorf("certificate expired on %s", parsedCert.NotAfter.Format(time.RFC3339))
+	}
+	if time.Until(parsedCert.NotAfter) < 30*24*time.Hour {
+		logger.Warn("External certificate expires soon; nothing here will renew it",
+			"domain", domain, "expires", parsedCert.NotAfter.Format(time.RFC3339))
+	}
+	return nil
 }
 
 // needsRenewalDueToExpiry checks if certificate needs renewal due to expiry

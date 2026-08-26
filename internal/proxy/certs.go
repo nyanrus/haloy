@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/haloydev/haloy/internal/helpers"
 )
 
 // CertManager manages TLS certificates for the proxy.
@@ -123,13 +125,6 @@ func (cm *CertManager) loadAndCacheCertificate(domain string) (*tls.Certificate,
 }
 
 // wildcardDomain returns a one-level wildcard domain for the provided hostname.
-func wildcardDomain(domain string) string {
-	parts := strings.Split(domain, ".")
-	if len(parts) < 3 {
-		return ""
-	}
-	return "*." + strings.Join(parts[1:], ".")
-}
 
 // validCertHostname reports whether name is a plausible DNS hostname. The SNI
 // value is attacker-controlled and used to build certificate file paths, so
@@ -191,7 +186,7 @@ func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 		}
 	}
 
-	if wildcard := wildcardDomain(serverName); wildcard != "" {
+	if wildcard := helpers.WildcardDomain(serverName); wildcard != "" {
 		if cert, ok := cm.getCachedCertificate(wildcard); ok {
 			return cert, nil
 		}

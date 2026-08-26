@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/haloydev/haloy/internal/constants"
@@ -17,6 +18,31 @@ import (
 type HaloydConfig struct {
 	API           HaloydAPIConfig     `json:"api" yaml:"api" toml:"api"`
 	HealthMonitor HealthMonitorConfig `json:"health_monitor" yaml:"health_monitor" toml:"health_monitor"`
+	Certificates  CertificatesConfig  `json:"certificates" yaml:"certificates" toml:"certificates"`
+}
+
+// CertificatesConfig says which certificates haloyd looks after itself.
+type CertificatesConfig struct {
+	// External lists domains whose certificate is supplied by the operator
+	// rather than obtained over ACME. haloyd will not request, renew or
+	// overwrite these; the proxy serves whatever <domain>.pem is in the
+	// certificate directory, exactly as it does for the ones ACME wrote.
+	//
+	// This lives here rather than in an app's `domains:` because it is a
+	// fact about the machine, not about the deployment: the .pem is put
+	// there by whoever runs the server. An app cannot opt itself into a
+	// certificate that nobody placed.
+	External []string `json:"external,omitempty" yaml:"external,omitempty" toml:"external,omitempty"`
+}
+
+// IsExternal reports whether the operator supplies this domain's certificate.
+func (c CertificatesConfig) IsExternal(domain string) bool {
+	for _, d := range c.External {
+		if strings.EqualFold(d, domain) {
+			return true
+		}
+	}
+	return false
 }
 
 type HaloydAPIConfig struct {

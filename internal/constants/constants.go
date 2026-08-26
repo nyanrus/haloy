@@ -21,6 +21,9 @@ const (
 
 	CertificatesHTTPProviderPort = "8080"
 
+	DefaultProxyHTTPAddr  = ":80"
+	DefaultProxyHTTPSAddr = ":443"
+
 	// haloyd's loopback API listener; the proxy forwards API-domain and
 	// localhost API traffic here.
 	HaloydAPIHost = "127.0.0.1"
@@ -32,6 +35,11 @@ const (
 	EnvVarDataDir   = "HALOY_DATA_DIR"   // used to override default data directory.
 	EnvVarConfigDir = "HALOY_CONFIG_DIR" // used to override default config directory.
 	EnvVarDebug     = "HALOY_DEBUG"
+	// The addresses haloy-proxy listens on. Overriding these lets a second
+	// proxy run beside an existing one on the same host — which is how you
+	// migrate onto haloy without taking the incumbent's traffic down first.
+	EnvVarProxyHTTPAddr  = "HALOY_PROXY_HTTP_ADDR"
+	EnvVarProxyHTTPSAddr = "HALOY_PROXY_HTTPS_ADDR"
 
 	// Default directories (system-wide installation)
 	SystemDataDir          = "/var/lib/haloy"

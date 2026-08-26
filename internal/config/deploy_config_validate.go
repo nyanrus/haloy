@@ -117,6 +117,12 @@ func (tc *TargetConfig) Validate(format string) error {
 		}
 	}
 
+	if tc.Hostname != "" {
+		if err := helpers.IsValidHostname(tc.Hostname); err != nil {
+			return fmt.Errorf("invalid %s: %w", GetFieldNameForFormat(TargetConfig{}, "Hostname", format), err)
+		}
+	}
+
 	if tc.Resources != nil {
 		if err := tc.Resources.Validate(); err != nil {
 			return err

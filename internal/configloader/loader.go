@@ -226,6 +226,10 @@ func MergeToTarget(deployConfig config.DeployConfig, targetConfig config.TargetC
 		tc.Resources = deployConfig.Resources
 	}
 
+	if tc.Hostname == "" {
+		tc.Hostname = deployConfig.Hostname
+	}
+
 	if tc.HealthCheck == nil {
 		tc.HealthCheck = deployConfig.HealthCheck
 	}

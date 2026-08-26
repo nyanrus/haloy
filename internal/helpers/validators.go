@@ -74,6 +74,24 @@ func validateDomainLabel(label string) error {
 	return nil
 }
 
+// IsValidHostname reports whether name can be a container hostname: one or
+// more dot-separated DNS labels. Unlike IsValidDomain it does not require a
+// TLD, because a hostname on a Docker network is usually a bare name.
+func IsValidHostname(name string) error {
+	if len(name) == 0 || len(name) > 253 {
+		return fmt.Errorf("hostname length must be between 1 and 253 characters")
+	}
+	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
+		return fmt.Errorf("hostname cannot start or end with a dot")
+	}
+	for _, label := range strings.Split(name, ".") {
+		if err := validateDomainLabel(label); err != nil {
+			return fmt.Errorf("invalid label '%s': %w", label, err)
+		}
+	}
+	return nil
+}
+
 func validateTLD(tld string) error {
 	// TLD must be at least 2 characters long (ICANN policy)
 	if len(tld) < 2 || len(tld) > 63 {

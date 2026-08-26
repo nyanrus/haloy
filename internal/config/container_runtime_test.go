@@ -163,3 +163,36 @@ func TestHealthCheckValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestHostnameValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostname string
+		wantErr  bool
+	}{
+		{name: "bare name", hostname: "natadeco-gw"},
+		{name: "dotted", hostname: "deployex.internal"},
+		{name: "no TLD required", hostname: "anubis"},
+		{name: "leading hyphen", hostname: "-bad", wantErr: true},
+		{name: "underscore", hostname: "not_a_hostname", wantErr: true},
+		{name: "trailing dot", hostname: "trailing.", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := &TargetConfig{
+				Name:     "app",
+				Server:   "test.haloy.dev",
+				Image:    &Image{Repository: "nginx"},
+				Hostname: tt.hostname,
+			}
+			err := tc.Validate("yaml")
+			if tt.wantErr && err == nil {
+				t.Fatalf("Validate() error = nil, want an error for hostname %q", tt.hostname)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() error = %v, want nil for hostname %q", err, tt.hostname)
+			}
+		})
+	}
+}

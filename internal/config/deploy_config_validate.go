@@ -117,6 +117,18 @@ func (tc *TargetConfig) Validate(format string) error {
 		}
 	}
 
+	if tc.Resources != nil {
+		if err := tc.Resources.Validate(); err != nil {
+			return err
+		}
+	}
+
+	if tc.HealthCheck != nil {
+		if err := tc.HealthCheck.Validate(); err != nil {
+			return err
+		}
+	}
+
 	if tc.Replicas != nil {
 		if int(*tc.Replicas) < 1 {
 			return errors.New("replicas must be at least 1")

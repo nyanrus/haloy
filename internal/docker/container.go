@@ -24,6 +24,25 @@ type ContainerRunResult struct {
 	ReplicaID    int
 }
 
+// healthConfigFor turns the config's HealthCheck into Docker's own shape. A
+// nil HealthCheck leaves the image's HEALTHCHECK (if it has one) alone.
+func healthConfigFor(hc *config.HealthCheck) (*container.HealthConfig, error) {
+	if hc == nil {
+		return nil, nil
+	}
+	interval, timeout, startPeriod, err := hc.Durations()
+	if err != nil {
+		return nil, err
+	}
+	return &container.HealthConfig{
+		Test:        hc.Test,
+		Interval:    interval,
+		Timeout:     timeout,
+		StartPeriod: startPeriod,
+		Retries:     hc.Retries,
+	}, nil
+}
+
 func RunContainer(ctx context.Context, cli *client.Client, deploymentID, imageRef string, targetConfig config.TargetConfig) ([]ContainerRunResult, error) {
 	result := make([]ContainerRunResult, 0, *targetConfig.Replicas)
 
@@ -50,18 +69,38 @@ func RunContainer(ctx context.Context, cli *client.Client, deploymentID, imageRe
 	if targetConfig.Network != "" {
 		network = container.NetworkMode(targetConfig.Network)
 	}
+	memoryBytes, err := targetConfig.Resources.MemoryBytes()
+	if err != nil {
+		return result, err
+	}
+	nanoCPUs, err := targetConfig.Resources.NanoCPUs()
+	if err != nil {
+		return result, err
+	}
+
 	hostConfig := &container.HostConfig{
 		NetworkMode:   network,
 		RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 		Binds:         targetConfig.Volumes,
+		Resources: container.Resources{
+			Memory:   memoryBytes,
+			NanoCPUs: nanoCPUs,
+		},
+	}
+
+	healthConfig, err := healthConfigFor(targetConfig.HealthCheck)
+	if err != nil {
+		return result, err
 	}
 
 	for i := range make([]struct{}, *targetConfig.Replicas) {
 		envVars := append(envVars, fmt.Sprintf("%s=%d", constants.EnvVarReplicaID, i+1))
 		containerConfig := &container.Config{
-			Image:  imageRef,
-			Labels: labels,
-			Env:    envVars,
+			Image:       imageRef,
+			Labels:      labels,
+			Env:         envVars,
+			Cmd:         targetConfig.Command,
+			Healthcheck: healthConfig,
 		}
 
 		var containerName string

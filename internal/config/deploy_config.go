@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"time"
 
+	"github.com/docker/go-units"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/haloydev/haloy/internal/helpers"
 )
@@ -46,6 +48,22 @@ type TargetConfig struct {
 	Network            string             `json:"network,omitempty" yaml:"network,omitempty" toml:"network,omitempty"`
 	PreDeploy          []string           `json:"preDeploy,omitempty" yaml:"pre_deploy,omitempty" toml:"pre_deploy,omitempty"`
 	PostDeploy         []string           `json:"postDeploy,omitempty" yaml:"post_deploy,omitempty" toml:"post_deploy,omitempty"`
+
+	// Command overrides the image's CMD. Application images normally carry the
+	// right one, but the side containers a `database` or `service` preset is
+	// for are usually stock images configured entirely on the command line —
+	// `postgres -c shared_buffers=128MB`, `nats --jetstream --store_dir /data`.
+	// Without this they can only be tuned by baking a derived image.
+	Command []string `json:"command,omitempty" yaml:"command,omitempty" toml:"command,omitempty"`
+
+	// Resources caps what this container may take from the host.
+	Resources *Resources `json:"resources,omitempty" yaml:"resources,omitempty" toml:"resources,omitempty"`
+
+	// HealthCheck is Docker's own HEALTHCHECK — distinct from HealthCheckPath,
+	// which is the HTTP probe haloy runs itself to decide whether a replica
+	// takes traffic. Containers with no HTTP surface (a database, a broker)
+	// have nothing to give the latter, and this is how they report health.
+	HealthCheck *HealthCheck `json:"healthcheck,omitempty" yaml:"healthcheck,omitempty" toml:"healthcheck,omitempty"`
 
 	// Non config fields. Not read from the config file and populated on load.
 	TargetName string `json:"-" yaml:"-" toml:"-"`
@@ -90,6 +108,121 @@ func (d *Domain) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Resources caps a container's share of the host.
+//
+// Both fields are optional; an empty one means "no limit", which is Docker's
+// own default. They matter most on a small single box running several
+// containers side by side, where one of them growing without a ceiling takes
+// the others down with it.
+type Resources struct {
+	// Memory is a byte size with an optional suffix: "512m", "2g", "1048576".
+	Memory string `json:"memory,omitempty" yaml:"memory,omitempty" toml:"memory,omitempty"`
+	// CPUs is a fractional core count, as in Docker's own --cpus: "0.5", "2".
+	CPUs string `json:"cpus,omitempty" yaml:"cpus,omitempty" toml:"cpus,omitempty"`
+}
+
+// MemoryBytes returns the memory limit in bytes, or 0 when unset.
+func (r *Resources) MemoryBytes() (int64, error) {
+	if r == nil || r.Memory == "" {
+		return 0, nil
+	}
+	bytes, err := units.RAMInBytes(r.Memory)
+	if err != nil {
+		return 0, fmt.Errorf("invalid memory '%s': %w", r.Memory, err)
+	}
+	if bytes <= 0 {
+		return 0, fmt.Errorf("invalid memory '%s': must be positive", r.Memory)
+	}
+	return bytes, nil
+}
+
+// NanoCPUs returns the CPU limit in nano-CPUs, or 0 when unset.
+func (r *Resources) NanoCPUs() (int64, error) {
+	if r == nil || r.CPUs == "" {
+		return 0, nil
+	}
+	cpus, err := strconv.ParseFloat(r.CPUs, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid cpus '%s': %w", r.CPUs, err)
+	}
+	if cpus <= 0 {
+		return 0, fmt.Errorf("invalid cpus '%s': must be positive", r.CPUs)
+	}
+	return int64(cpus * 1e9), nil
+}
+
+func (r *Resources) Validate() error {
+	if _, err := r.MemoryBytes(); err != nil {
+		return err
+	}
+	_, err := r.NanoCPUs()
+	return err
+}
+
+// HealthCheck mirrors Docker's HEALTHCHECK.
+type HealthCheck struct {
+	// Test is the check itself, in Docker's own form: the first element is
+	// "CMD" or "CMD-SHELL" and the rest is the command, e.g.
+	// ["CMD-SHELL", "pg_isready -U postgres"].
+	Test []string `json:"test" yaml:"test" toml:"test"`
+	// Interval, Timeout and StartPeriod are Go durations ("10s", "1m").
+	// An empty one leaves Docker's default in place.
+	Interval    string `json:"interval,omitempty" yaml:"interval,omitempty" toml:"interval,omitempty"`
+	Timeout     string `json:"timeout,omitempty" yaml:"timeout,omitempty" toml:"timeout,omitempty"`
+	StartPeriod string `json:"startPeriod,omitempty" yaml:"start_period,omitempty" toml:"start_period,omitempty"`
+	// Retries is how many consecutive failures make the container unhealthy.
+	Retries int `json:"retries,omitempty" yaml:"retries,omitempty" toml:"retries,omitempty"`
+}
+
+// Durations parses Interval, Timeout and StartPeriod. An empty field comes
+// back as 0, which Docker reads as "use the default".
+func (h *HealthCheck) Durations() (interval, timeout, startPeriod time.Duration, err error) {
+	if h == nil {
+		return 0, 0, 0, nil
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+		into  *time.Duration
+	}{
+		{"interval", h.Interval, &interval},
+		{"timeout", h.Timeout, &timeout},
+		{"start_period", h.StartPeriod, &startPeriod},
+	} {
+		if field.value == "" {
+			continue
+		}
+		d, parseErr := time.ParseDuration(field.value)
+		if parseErr != nil {
+			return 0, 0, 0, fmt.Errorf("invalid healthcheck %s '%s': %w", field.name, field.value, parseErr)
+		}
+		if d <= 0 {
+			return 0, 0, 0, fmt.Errorf("invalid healthcheck %s '%s': must be positive", field.name, field.value)
+		}
+		*field.into = d
+	}
+	return interval, timeout, startPeriod, nil
+}
+
+func (h *HealthCheck) Validate() error {
+	if h == nil {
+		return nil
+	}
+	if len(h.Test) == 0 {
+		return errors.New("healthcheck test cannot be empty")
+	}
+	switch h.Test[0] {
+	case "CMD", "CMD-SHELL", "NONE":
+	default:
+		return fmt.Errorf("healthcheck test must start with 'CMD', 'CMD-SHELL' or 'NONE', got '%s'", h.Test[0])
+	}
+	if h.Retries < 0 {
+		return errors.New("healthcheck retries cannot be negative")
+	}
+	_, _, _, err := h.Durations()
+	return err
 }
 
 type EnvVar struct {

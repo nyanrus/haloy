@@ -218,6 +218,18 @@ func MergeToTarget(deployConfig config.DeployConfig, targetConfig config.TargetC
 		tc.HealthCheckPath = deployConfig.HealthCheckPath
 	}
 
+	if tc.Command == nil {
+		tc.Command = deployConfig.Command
+	}
+
+	if tc.Resources == nil {
+		tc.Resources = deployConfig.Resources
+	}
+
+	if tc.HealthCheck == nil {
+		tc.HealthCheck = deployConfig.HealthCheck
+	}
+
 	if tc.Port == "" {
 		tc.Port = deployConfig.Port
 	}

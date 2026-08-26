@@ -230,6 +230,10 @@ func MergeToTarget(deployConfig config.DeployConfig, targetConfig config.TargetC
 		tc.Hostname = deployConfig.Hostname
 	}
 
+	if tc.Publish == nil {
+		tc.Publish = deployConfig.Publish
+	}
+
 	if tc.HealthCheck == nil {
 		tc.HealthCheck = deployConfig.HealthCheck
 	}
